@@ -95,7 +95,7 @@ declare class File {
      *
      * TODO: return `(File|File[])` in TSC 1.4
      */
-    static openDialog(prompt_?: string, filter?: string, multiSelect?: boolean): any
+    static openDialog(prompt_?: string, filter?: string, multiSelect?: boolean): File|File[]
 
     /*
      * Opens the built-in platform-specific file-browsing dialog in which a user
@@ -265,7 +265,7 @@ declare class File {
      *
      * @return true on success.
      */
-    changePath(path: string): string
+    changePath(path: string): boolean
 
     /*
      * Closes this open file.
@@ -378,7 +378,7 @@ declare class File {
      *
      * TODO: return `(File|File[])` in TSC 1.4
      */
-    OpenDlg(prompt_?: string, filter?: string, multiSelect?: boolean): any
+    openDlg(prompt_?: string, filter?: string, multiSelect?: boolean): File|File[]
 
     /*
      * Reads the contents of the file starting at the current position.
@@ -689,7 +689,7 @@ declare class Folder {
      *
      * TODO: return `(File|Folder)` in TSC 1.4
      */
-    static selectDialog(prompt?: string): any
+    static selectDialog(prompt?: string): File|Folder
 
     /*
      * The full path name for the referenced folder in URI notation. Read only.
@@ -817,7 +817,7 @@ declare class Folder {
      *
      * TODO: return `(File|Folder)[]` in TSC 1.4
      */
-    getFiles(mask?: string): any[]
+    getFiles(mask?: string): (File|Folder)[]
 
     /*
      * Retrieves the path for this folder relative to the specified base path or
@@ -877,5 +877,5 @@ declare class Folder {
      *
      * TODO: return `(File|Folder)` in TSC 1.4
      */
-    selectDlg(prompt_: string): any
+    selectDlg(prompt_: string): File|Folder
 }
