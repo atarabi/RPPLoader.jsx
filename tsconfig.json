@@ -1,9 +1,12 @@
 {
 	"compilerOptions": {
 		"target": "ES3",
+		"outFile": "RPPLoader.jsx",
 		"noLib": true
 	},
 	"files": [
+		"typings/aftereffects/ae.d.ts",
+		"typings/kikaku/Kikaku.d.ts",
 		"RPPLoader.ts"
 	]
 }
