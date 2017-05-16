@@ -1,5 +1,5 @@
 /*
- *  RPPLoader.jsx v0.0.0 / ScriptUI
+ *  RPPLoader.jsx v0.1.0 / ScriptUI
  *
  *  Author: Kareobana(http://atarabi.com/)
  *  License: MIT
