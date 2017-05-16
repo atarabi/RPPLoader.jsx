@@ -7,16 +7,10 @@
  *    Kikaku.jsx
  */
 
-/// <reference path="./typings/aftereffects/ae.d.ts" />
-/// <reference path="./typings/kikaku/Kikaku.d.ts" />
+(function (global) {
 
-(function(global) {
-	
   //Lib
-  const Utils = KIKAKU.Utils;
-  const JSON = KIKAKU.JSON;
-  const UIBuilder = KIKAKU.UIBuilder;
-  const PARAMETER_TYPE = UIBuilder.PARAMETER_TYPE;
+  const { Utils, JSON, UIBuilder } = KIKAKU;
 
   //Constants
   const SCRIPT_NAME = 'RPPLoader';
@@ -24,6 +18,19 @@
   const AE_VERSION = parseFloat(app.version);
 
   const DEBUG = false;
+
+  //Utility
+  function getFileByPath(path: string, base_uri: string): File {
+    let file = new File(path);
+    if (!file.exists) {
+      let relative_file = new File(base_uri);
+      relative_file.changePath(path);
+      if (relative_file.exists) {
+        file = relative_file;
+      }
+    }
+    return file;
+  }
 
   //RPP
   const RPP_HEADER = '<REAPER_PROJECT';
@@ -119,7 +126,7 @@
     }
     load(lines: string[], row: number) {
       for (let total = lines.length; row < total; ++row) {
-        const {type, name, values} = RPPParser(lines[row]);
+        const { type, name, values } = RPPParser(lines[row]);
         if (type === RPPType.SECTION_START) {
           let section = new RPPSection(name, values);
           if (!this.children[name]) {
@@ -177,8 +184,8 @@
       }
       this.sm = Utils.map(Utils.filter(section.properties['SM'] ? section.properties['SM'][0] : [], val => val !== '+'), val => +val);
     }
-    isMIDI() {
-      return this.source_type === 'MIDI';
+    getSourceType() {
+      return this.source_type;
     }
     isMute() {
       return this.mute || this.track_mute;
@@ -198,7 +205,7 @@
     getFilePath() {
       return this.file;
     }
-    arrange(layer: AVLayer, {apply_stretch_markers, order_type}: {
+    arrange(layer: AVLayer, { apply_stretch_markers, order_type }: {
       apply_stretch_markers: boolean;
       order_type: string;
     }) {
@@ -273,6 +280,21 @@
   }
 
   class RPPLoader {
+    static loadContents(file: File) {
+      if (!file.exists) {
+        return '';
+      }
+      let contents = '';
+      file.encoding = 'UTF-8';
+      if (file.open('r')) {
+        let header = file.read(RPP_HEADER.length);
+        if (header === RPP_HEADER) {
+          contents = header + file.read();
+        }
+        file.close();
+      }
+      return contents;
+    }
     static MASTER_TRACK_COMMENT = '[Master Track]';
     static TEMPO_TRACK_COMMENT = '[Tempo Track]';
     private file: File = null;
@@ -301,7 +323,7 @@
       const root_result = RPPParser(lines[0]);
       const root = new RPPSection(root_result.name, root_result.values);
       root.load(lines, 1);
-      
+
       //items
       let mutes: boolean[] = [false];
       let prev_isbus: [number, number] = [0, 0];
@@ -327,32 +349,30 @@
         const items = track.children['ITEM'] || [];
         Utils.forEach(items, (item: RPPSection) => {
           let rpp_item = new RPPItem(item, track_mute);
-          if (!rpp_item.isMIDI()) {
-            this.items.push(rpp_item);
-          }
+          this.items.push(rpp_item);
         });
       });
-      
+
       //size
       if (root.properties['VIDEO_CONFIG']) {
         this.size = <[number, number, number]>Utils.map(root.properties['VIDEO_CONFIG'][0], val => +val);
       }
-      
+
       //framerate
       if (root.properties['SMPTESYNC']) {
         this.framerate = +root.properties['SMPTESYNC'][0][1];
       }
-      
+
       //render file
       if (root.properties['RENDER_FILE']) {
         this.render_file = root.properties['RENDER_FILE'][0][0];
       }
-      
+
       //tempo
       if (root.properties['TEMPO']) {
         this.tempo = Utils.map(root.properties['TEMPO'][0], val => +val);
       }
-      
+
       //markers
       if (root.properties['MARKER']) {
         this.markers = Utils.map(root.properties['MARKER'], (values: any[]) => {
@@ -372,23 +392,36 @@
         size: this.size,
       };
     }
-    execute({target, sort, add_mute_tracks, apply_stretch_markers}: {
+    execute({ target, sort, add_mute_tracks, apply_stretch_markers }: {
       target: string;
       sort: { order_by: string; order_type: string; };
       add_mute_tracks: boolean;
       apply_stretch_markers: boolean;
-    }) {
+    }, is_child = false): CompItem {
       if (!this.items.length) {
-        return;
+        return null;
       }
-      const comp = target === TARGET.NEW_COMP ? this.createComp(add_mute_tracks) : Utils.getActiveComp();
-      if (!comp) {
-        return;
+      let comp: CompItem;
+      if (target === TARGET.AUTO) {
+        const item = Utils.getItem([Utils.ITEM_FILTER.COMP, (item: CompItem) => item.comment === this.file.absoluteURI]) as CompItem;
+        if (item) {
+          comp = item;
+        } else {
+          comp = this.createComp(is_child ? true : add_mute_tracks);
+        }
+      } else if (target === TARGET.NEW_COMP) {
+        comp = this.createComp(add_mute_tracks);
+      } else if (target === TARGET.ACTIVE_COMP) {
+        comp = Utils.getActiveComp();
+      } else {
+        return null;
       }
       const analyzer = new CompAnalyzer(comp);
       this.createLayers(comp, analyzer, { sort, add_mute_tracks, apply_stretch_markers });
       this.createTempo(comp, analyzer);
       this.createMarkers(comp);
+      comp.comment = this.file.absoluteURI;
+      return comp;
     }
     private createComp(add_mute_tracks: boolean) {
       const duration: number = Utils.reduce(this.items, (duration: number, item: RPPItem) => {
@@ -396,10 +429,10 @@
           return duration;
         }
         return Math.max(duration, item.getOutPoint());
-      }, 0);
-      return app.project.items.addComp(this.file.displayName, this.size[0], this.size[1], 1, duration, this.framerate);
+      }, 0) as number;
+      return app.project.items.addComp(this.file.displayName, this.size[0] || 1280, this.size[1] || 720, 1, duration, this.framerate);
     }
-    private createLayers(comp: CompItem, analyzer: CompAnalyzer, {sort, add_mute_tracks, apply_stretch_markers}: {
+    private createLayers(comp: CompItem, analyzer: CompAnalyzer, { sort, add_mute_tracks, apply_stretch_markers }: {
       sort: { order_by: string; order_type: string; };
       add_mute_tracks: boolean;
       apply_stretch_markers: boolean;
@@ -414,8 +447,20 @@
         } else if (item.isMute() && !add_mute_tracks) {
           return;
         }
+        const source_type = item.getSourceType();
+        if (source_type === 'MIDI') {
+          return;
+        }
         const file_path = item.getFilePath();
-        let av_item = av_store[file_path] || (av_store[file_path] = this.importItem(file_path));
+        let av_item: AVItem;
+        switch (source_type) {
+          case 'RPP_PROJECT':
+            av_item = av_store[file_path] || (av_store[file_path] = this.importRPP(file_path, sort, add_mute_tracks, apply_stretch_markers));
+            break;
+          default:
+            av_item = av_store[file_path] || (av_store[file_path] = this.importItem(file_path));
+            break;
+        }
         const layer = comp.layers.add(av_item);
         item.arrange(layer, { apply_stretch_markers, order_type: sort.order_type });
       });
@@ -437,22 +482,38 @@
         }
       }
     }
-    private importItem(path: string, placeholder = true): AVItem {
-      let file = new File(path);
+    private importRPP(path: string, sort: { order_by: string; order_type: string; }, add_mute_tracks: boolean, apply_stretch_markers: boolean): AVItem {
+      const file = getFileByPath(path, this.file.parent.absoluteURI);
       if (!file.exists) {
-        file = new File(this.file.parent.fullName + '/' + path);
-        if (!file.exists) {
-          if (placeholder) {
-            return this.importPlaceholder(file, path);
-          }
-          throw new Error(`Not found: ${path}`);
-        }
+        throw new Error(`Not found: ${path}`);
       }
-      return <FootageItem>Utils.getItem([Utils.ITEM_FILTER.FOOTAGE, (item: FootageItem) => item.file.absoluteURI === file.absoluteURI]) || app.project.importFile(new ImportOptions(file));
+      const contents = RPPLoader.loadContents(file);
+      if (!contents) {
+        throw `${path} isn't a RPP file`;
+      }
+      const new_loader = new RPPLoader;
+      new_loader.load(file, contents);
+      const item = new_loader.execute({
+        target: TARGET.AUTO,
+        sort,
+        add_mute_tracks,
+        apply_stretch_markers,
+      }, true);
+      return item;
+    }
+    private importItem(path: string, placeholder = true): AVItem {
+      let file = getFileByPath(path, this.file.parent.absoluteURI);
+      if (!file.exists) {
+        if (placeholder) {
+          return this.importPlaceholder(file, path);
+        }
+        throw new Error(`Not found: ${path}`);
+      }
+      return Utils.getItem([Utils.ITEM_FILTER.FOOTAGE, (item: FootageItem) => item.file && item.file.absoluteURI === file.absoluteURI]) as FootageItem || app.project.importFile(new ImportOptions(file));
     }
     private importPlaceholder(file: File, path: string): AVItem {
       const items = Utils.filter(this.items, (item: RPPItem) => item.getFilePath() === path);
-      const duration = Utils.reduce(items, (duration: number, item: RPPItem) => Math.max(duration, item.getEstimatedDuration()), 0);
+      const duration = Utils.reduce(items, (duration: number, item: RPPItem) => Math.max(duration, item.getEstimatedDuration()), 0) as number;
       return app.project.importPlaceholder(file.displayName, this.size[0], this.size[1], this.framerate, duration);
     }
     private createTempo(comp: CompItem, analyzer: CompAnalyzer) {
@@ -479,7 +540,6 @@
         const marker_value = new MarkerValue(`${beat}`);
         marker.setValueAtTime(time, marker_value);
       }
-
     }
     private createMarkers(comp: CompItem) {
       if (this.markers.length) {
@@ -489,12 +549,12 @@
           Utils.forEach(this.markers, (marker: number) => {
             comp.time = marker;
             app.executeCommand(CommandID.AddMarker);
-          })
+          });
         }
       }
     }
   }
-  
+
   //Main
   const PARAM = {
     LOAD_START: 'Load Start',
@@ -511,6 +571,7 @@
   };
 
   const TARGET = {
+    AUTO: 'Auto',
     NEW_COMP: 'New Comp',
     ACTIVE_COMP: 'Active Comp',
   };
@@ -521,8 +582,8 @@
   };
 
   const ORDER_BY = {
-    TIME: 'Time',
     TRACK: 'Track',
+    TIME: 'Time',
   };
 
   const ORDER_TYPE = {
@@ -547,8 +608,8 @@
   });
 
   builder
-    .add(PARAMETER_TYPE.PANEL, PARAM.LOAD_START, 'Load')
-    .add(PARAMETER_TYPE.FILE, PARAM.RPP, '', {
+    .addPanel(PARAM.LOAD_START, 'Load')
+    .addFile(PARAM.RPP, '', {
       callback: () => {
         const file_path = builder.get(PARAM.RPP);
         const file = new File(file_path);
@@ -558,40 +619,29 @@
       },
       filter: '*.rpp',
     })
-    .add(PARAMETER_TYPE.SCRIPT, PARAM.LOAD, () => {
+    .addScript(PARAM.LOAD, () => {
       const file_path = builder.get(PARAM.RPP);
       const file = new File(file_path);
-      if (!file.exists) {
-        return;
+      const contents = RPPLoader.loadContents(file);
+      if (!contents) {
+        return alert('Not a RPP file');
       }
-      file.encoding = 'UTF-8';
-      let contents = '';
-      if (file.open('r')) {
-        let header = file.read(RPP_HEADER.length);
-        if (header !== RPP_HEADER) {
-          return alert('Not a RPP file');
-        }
-        contents = header + file.read();
-        file.close();
-      } else {
-        return;
-      }
-      const {item_num, active_item_num, framerate, size} = loader.load(file, contents);
+      const { item_num, active_item_num, framerate, size } = loader.load(file, contents);
       builder.set(PARAM.INFO, `item: ${item_num}(active: ${active_item_num}), size: [${size[0]}, ${size[1]}], fps: ${framerate}`);
     })
-    .add(PARAMETER_TYPE.STATICTEXT, PARAM.INFO, '', {
+    .addStatictext(PARAM.INFO, '', {
       title: false,
     })
-    .add(PARAMETER_TYPE.PANEL_END, PARAM.LOAD_END)
-    .add(PARAMETER_TYPE.PANEL, PARAM.EXECUTE_START, 'Execute')
-    .add(PARAMETER_TYPE.POPUP, PARAM.TARGET, Utils.values(TARGET))
-    .add(PARAMETER_TYPE.POPUPS, PARAM.SORT, [Utils.values(ORDER_BY), Utils.values(ORDER_TYPE)])
-    .add(PARAMETER_TYPE.CHECKBOXES, PARAM.OPTIONS, [
+    .addPanelEnd(PARAM.LOAD_END)
+    .addPanel(PARAM.EXECUTE_START, 'Execute')
+    .addPopup(PARAM.TARGET, Utils.values(TARGET))
+    .addPopups(PARAM.SORT, [Utils.values(ORDER_BY), Utils.values(ORDER_TYPE)])
+    .addCheckboxes(PARAM.OPTIONS, [
       { text: 'Add mute tracks', value: false },
       { text: 'Apply stretch markers', value: true },
     ], { title: false })
-    .add(PARAMETER_TYPE.SCRIPT, PARAM.EXECUTE, () => {
-      loader.execute({
+    .addScript(PARAM.EXECUTE, () => {
+      const comp = loader.execute({
         target: builder.get(PARAM.TARGET),
         sort: {
           order_by: builder.get(PARAM.SORT, SORT.ORDER_BY),
@@ -600,10 +650,13 @@
         add_mute_tracks: builder.get(PARAM.OPTIONS, OPTIONS.ADD_MUTE_TRACKS),
         apply_stretch_markers: builder.get(PARAM.OPTIONS, OPTIONS.APPLY_STRETCH_MARKERS),
       });
+      if (comp) {
+        comp.openInViewer();
+      }
     })
-    .add(PARAMETER_TYPE.PANEL_END, PARAM.EXECUTE_END)
+    .addPanelEnd(PARAM.EXECUTE_END)
     .build();
-    
+
   //function
   function log(obj) {
     if (DEBUG) {

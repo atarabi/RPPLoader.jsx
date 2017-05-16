@@ -6,18 +6,25 @@
  *  Dependencies:
  *    Kikaku.jsx
  */
-/// <reference path="./typings/aftereffects/ae.d.ts" />
-/// <reference path="./typings/kikaku/Kikaku.d.ts" />
 (function (global) {
     //Lib
-    var Utils = KIKAKU.Utils;
-    var JSON = KIKAKU.JSON;
-    var UIBuilder = KIKAKU.UIBuilder;
-    var PARAMETER_TYPE = UIBuilder.PARAMETER_TYPE;
+    var Utils = KIKAKU.Utils, JSON = KIKAKU.JSON, UIBuilder = KIKAKU.UIBuilder;
     //Constants
     var SCRIPT_NAME = 'RPPLoader';
     var AE_VERSION = parseFloat(app.version);
     var DEBUG = false;
+    //Utility
+    function getFileByPath(path, base_uri) {
+        var file = new File(path);
+        if (!file.exists) {
+            var relative_file = new File(base_uri);
+            relative_file.changePath(path);
+            if (relative_file.exists) {
+                file = relative_file;
+            }
+        }
+        return file;
+    }
     //RPP
     var RPP_HEADER = '<REAPER_PROJECT';
     var RPPType;
@@ -130,7 +137,7 @@
             return row;
         };
         return RPPSection;
-    })();
+    }());
     var RPPItem = (function () {
         function RPPItem(section, track_mute) {
             this.position = +section.properties['POSITION'][0][0];
@@ -155,8 +162,8 @@
             }
             this.sm = Utils.map(Utils.filter(section.properties['SM'] ? section.properties['SM'][0] : [], function (val) { return val !== '+'; }), function (val) { return +val; });
         }
-        RPPItem.prototype.isMIDI = function () {
-            return this.source_type === 'MIDI';
+        RPPItem.prototype.getSourceType = function () {
+            return this.source_type;
         };
         RPPItem.prototype.isMute = function () {
             return this.mute || this.track_mute;
@@ -210,7 +217,7 @@
             }
         };
         return RPPItem;
-    })();
+    }());
     var CompAnalyzer = (function () {
         function CompAnalyzer(comp) {
             var _this = this;
@@ -248,9 +255,9 @@
         CompAnalyzer.prototype.getTempoLayer = function () {
             return this.tempo_layer;
         };
-        CompAnalyzer.GUID_REGEX = /(\{[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\})/i;
         return CompAnalyzer;
-    })();
+    }());
+    CompAnalyzer.GUID_REGEX = /(\{[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\})/i;
     var RPPLoader = (function () {
         function RPPLoader() {
             this.file = null;
@@ -261,6 +268,21 @@
             this.tempo = [];
             this.markers = [];
         }
+        RPPLoader.loadContents = function (file) {
+            if (!file.exists) {
+                return '';
+            }
+            var contents = '';
+            file.encoding = 'UTF-8';
+            if (file.open('r')) {
+                var header = file.read(RPP_HEADER.length);
+                if (header === RPP_HEADER) {
+                    contents = header + file.read();
+                }
+                file.close();
+            }
+            return contents;
+        };
         RPPLoader.prototype.clear = function () {
             this.file = null;
             this.size = [1280, 720, 0];
@@ -304,9 +326,7 @@
                 var items = track.children['ITEM'] || [];
                 Utils.forEach(items, function (item) {
                     var rpp_item = new RPPItem(item, track_mute);
-                    if (!rpp_item.isMIDI()) {
-                        _this.items.push(rpp_item);
-                    }
+                    _this.items.push(rpp_item);
                 });
             });
             //size
@@ -343,19 +363,38 @@
                 size: this.size
             };
         };
-        RPPLoader.prototype.execute = function (_a) {
+        RPPLoader.prototype.execute = function (_a, is_child) {
+            var _this = this;
             var target = _a.target, sort = _a.sort, add_mute_tracks = _a.add_mute_tracks, apply_stretch_markers = _a.apply_stretch_markers;
+            if (is_child === void 0) { is_child = false; }
             if (!this.items.length) {
-                return;
+                return null;
             }
-            var comp = target === TARGET.NEW_COMP ? this.createComp(add_mute_tracks) : Utils.getActiveComp();
-            if (!comp) {
-                return;
+            var comp;
+            if (target === TARGET.AUTO) {
+                var item = Utils.getItem([Utils.ITEM_FILTER.COMP, function (item) { return item.comment === _this.file.absoluteURI; }]);
+                if (item) {
+                    comp = item;
+                }
+                else {
+                    comp = this.createComp(is_child ? true : add_mute_tracks);
+                }
+            }
+            else if (target === TARGET.NEW_COMP) {
+                comp = this.createComp(add_mute_tracks);
+            }
+            else if (target === TARGET.ACTIVE_COMP) {
+                comp = Utils.getActiveComp();
+            }
+            else {
+                return null;
             }
             var analyzer = new CompAnalyzer(comp);
             this.createLayers(comp, analyzer, { sort: sort, add_mute_tracks: add_mute_tracks, apply_stretch_markers: apply_stretch_markers });
             this.createTempo(comp, analyzer);
             this.createMarkers(comp);
+            comp.comment = this.file.absoluteURI;
+            return comp;
         };
         RPPLoader.prototype.createComp = function (add_mute_tracks) {
             var duration = Utils.reduce(this.items, function (duration, item) {
@@ -364,7 +403,7 @@
                 }
                 return Math.max(duration, item.getOutPoint());
             }, 0);
-            return app.project.items.addComp(this.file.displayName, this.size[0], this.size[1], 1, duration, this.framerate);
+            return app.project.items.addComp(this.file.displayName, this.size[0] || 1280, this.size[1] || 720, 1, duration, this.framerate);
         };
         RPPLoader.prototype.createLayers = function (comp, analyzer, _a) {
             var _this = this;
@@ -380,8 +419,20 @@
                 else if (item.isMute() && !add_mute_tracks) {
                     return;
                 }
+                var source_type = item.getSourceType();
+                if (source_type === 'MIDI') {
+                    return;
+                }
                 var file_path = item.getFilePath();
-                var av_item = av_store[file_path] || (av_store[file_path] = _this.importItem(file_path));
+                var av_item;
+                switch (source_type) {
+                    case 'RPP_PROJECT':
+                        av_item = av_store[file_path] || (av_store[file_path] = _this.importRPP(file_path, sort, add_mute_tracks, apply_stretch_markers));
+                        break;
+                    default:
+                        av_item = av_store[file_path] || (av_store[file_path] = _this.importItem(file_path));
+                        break;
+                }
                 var layer = comp.layers.add(av_item);
                 item.arrange(layer, { apply_stretch_markers: apply_stretch_markers, order_type: sort.order_type });
             });
@@ -399,23 +450,40 @@
                         }
                     }
                     catch (e) {
+                        //pass
                     }
                 }
             }
         };
+        RPPLoader.prototype.importRPP = function (path, sort, add_mute_tracks, apply_stretch_markers) {
+            var file = getFileByPath(path, this.file.parent.absoluteURI);
+            if (!file.exists) {
+                throw new Error("Not found: " + path);
+            }
+            var contents = RPPLoader.loadContents(file);
+            if (!contents) {
+                throw path + " isn't a RPP file";
+            }
+            var new_loader = new RPPLoader;
+            new_loader.load(file, contents);
+            var item = new_loader.execute({
+                target: TARGET.AUTO,
+                sort: sort,
+                add_mute_tracks: add_mute_tracks,
+                apply_stretch_markers: apply_stretch_markers
+            }, true);
+            return item;
+        };
         RPPLoader.prototype.importItem = function (path, placeholder) {
             if (placeholder === void 0) { placeholder = true; }
-            var file = new File(path);
+            var file = getFileByPath(path, this.file.parent.absoluteURI);
             if (!file.exists) {
-                file = new File(this.file.parent.fullName + '/' + path);
-                if (!file.exists) {
-                    if (placeholder) {
-                        return this.importPlaceholder(file, path);
-                    }
-                    throw new Error("Not found: " + path);
+                if (placeholder) {
+                    return this.importPlaceholder(file, path);
                 }
+                throw new Error("Not found: " + path);
             }
-            return Utils.getItem([Utils.ITEM_FILTER.FOOTAGE, function (item) { return item.file.absoluteURI === file.absoluteURI; }]) || app.project.importFile(new ImportOptions(file));
+            return Utils.getItem([Utils.ITEM_FILTER.FOOTAGE, function (item) { return item.file && item.file.absoluteURI === file.absoluteURI; }]) || app.project.importFile(new ImportOptions(file));
         };
         RPPLoader.prototype.importPlaceholder = function (file, path) {
             var items = Utils.filter(this.items, function (item) { return item.getFilePath() === path; });
@@ -459,10 +527,10 @@
                 }
             }
         };
-        RPPLoader.MASTER_TRACK_COMMENT = '[Master Track]';
-        RPPLoader.TEMPO_TRACK_COMMENT = '[Tempo Track]';
         return RPPLoader;
-    })();
+    }());
+    RPPLoader.MASTER_TRACK_COMMENT = '[Master Track]';
+    RPPLoader.TEMPO_TRACK_COMMENT = '[Tempo Track]';
     //Main
     var PARAM = {
         LOAD_START: 'Load Start',
@@ -478,6 +546,7 @@
         EXECUTE_END: 'Execute End'
     };
     var TARGET = {
+        AUTO: 'Auto',
         NEW_COMP: 'New Comp',
         ACTIVE_COMP: 'Active Comp'
     };
@@ -486,8 +555,8 @@
         ORDER_TYPE: 1
     };
     var ORDER_BY = {
-        TIME: 'Time',
-        TRACK: 'Track'
+        TRACK: 'Track',
+        TIME: 'Time'
     };
     var ORDER_TYPE = {
         ASC: 'Ascending',
@@ -507,8 +576,8 @@
         titleWidth: 50
     });
     builder
-        .add(PARAMETER_TYPE.PANEL, PARAM.LOAD_START, 'Load')
-        .add(PARAMETER_TYPE.FILE, PARAM.RPP, '', {
+        .addPanel(PARAM.LOAD_START, 'Load')
+        .addFile(PARAM.RPP, '', {
         callback: function () {
             var file_path = builder.get(PARAM.RPP);
             var file = new File(file_path);
@@ -518,41 +587,29 @@
         },
         filter: '*.rpp'
     })
-        .add(PARAMETER_TYPE.SCRIPT, PARAM.LOAD, function () {
+        .addScript(PARAM.LOAD, function () {
         var file_path = builder.get(PARAM.RPP);
         var file = new File(file_path);
-        if (!file.exists) {
-            return;
-        }
-        file.encoding = 'UTF-8';
-        var contents = '';
-        if (file.open('r')) {
-            var header = file.read(RPP_HEADER.length);
-            if (header !== RPP_HEADER) {
-                return alert('Not a RPP file');
-            }
-            contents = header + file.read();
-            file.close();
-        }
-        else {
-            return;
+        var contents = RPPLoader.loadContents(file);
+        if (!contents) {
+            return alert('Not a RPP file');
         }
         var _a = loader.load(file, contents), item_num = _a.item_num, active_item_num = _a.active_item_num, framerate = _a.framerate, size = _a.size;
         builder.set(PARAM.INFO, "item: " + item_num + "(active: " + active_item_num + "), size: [" + size[0] + ", " + size[1] + "], fps: " + framerate);
     })
-        .add(PARAMETER_TYPE.STATICTEXT, PARAM.INFO, '', {
+        .addStatictext(PARAM.INFO, '', {
         title: false
     })
-        .add(PARAMETER_TYPE.PANEL_END, PARAM.LOAD_END)
-        .add(PARAMETER_TYPE.PANEL, PARAM.EXECUTE_START, 'Execute')
-        .add(PARAMETER_TYPE.POPUP, PARAM.TARGET, Utils.values(TARGET))
-        .add(PARAMETER_TYPE.POPUPS, PARAM.SORT, [Utils.values(ORDER_BY), Utils.values(ORDER_TYPE)])
-        .add(PARAMETER_TYPE.CHECKBOXES, PARAM.OPTIONS, [
+        .addPanelEnd(PARAM.LOAD_END)
+        .addPanel(PARAM.EXECUTE_START, 'Execute')
+        .addPopup(PARAM.TARGET, Utils.values(TARGET))
+        .addPopups(PARAM.SORT, [Utils.values(ORDER_BY), Utils.values(ORDER_TYPE)])
+        .addCheckboxes(PARAM.OPTIONS, [
         { text: 'Add mute tracks', value: false },
         { text: 'Apply stretch markers', value: true },
     ], { title: false })
-        .add(PARAMETER_TYPE.SCRIPT, PARAM.EXECUTE, function () {
-        loader.execute({
+        .addScript(PARAM.EXECUTE, function () {
+        var comp = loader.execute({
             target: builder.get(PARAM.TARGET),
             sort: {
                 order_by: builder.get(PARAM.SORT, SORT.ORDER_BY),
@@ -561,8 +618,11 @@
             add_mute_tracks: builder.get(PARAM.OPTIONS, OPTIONS.ADD_MUTE_TRACKS),
             apply_stretch_markers: builder.get(PARAM.OPTIONS, OPTIONS.APPLY_STRETCH_MARKERS)
         });
+        if (comp) {
+            comp.openInViewer();
+        }
     })
-        .add(PARAMETER_TYPE.PANEL_END, PARAM.EXECUTE_END)
+        .addPanelEnd(PARAM.EXECUTE_END)
         .build();
     //function
     function log(obj) {
